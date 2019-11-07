@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<title>
+  Making a snap container unscrollable reassigns its snap areas to its next
+  scrollable ancestor, regardless of its snap type.
+</title>
+<link rel="help" href="https://drafts.csswg.org/css-scroll-snap/#overview"/>
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<style>
+div {
+  position: absolute;
+  margin: 0px;
+}
+
+html {
+  scroll-snap-type: y mandatory;
+}
+
+body {
+  margin: 0px;
+}
+
+#outer-scroller {
+  height: 600px;
+  width: 600px;
+  overflow: scroll;
+  scroll-snap-type: y mandatory;
+}
+
+#middle-scroller {
+  top: 100px;
+  height: 500px;
+  width: 500px;
+  overflow: scroll;
+  background-color: rgb(12, 61, 2);
+  scroll-snap-type: none;
+}
+
+#inner-scroller {
+  top: 200px;
+  height: 400px;
+  width: 400px;
+  overflow: scroll;
+  background-color: rgb(65, 139, 50);
+  scroll-snap-type: y mandatory;
+}
+
+.space {
+  width: 2000px;
+  height: 2000px;
+}
+
+#snap-area {
+  top: 400px;
+  width: 200px;
+  height: 200px;
+  background-color: blue;
+  scroll-snap-align: start;
+}
+
+</style>
+<div class="space"></div>
+<div id="outer-scroller">
+  <div class="space"></div>
+  <div id="middle-scroller">
+    <div class="space"></div>
+    <div id="inner-scroller">
+        <div class="space"></div>
+        <div id="snap-area"></div>
+    </div>
+  </div>
+</div>
+<script>
+
+// This tests that making a snap container no longer scrollable will reassign
+// its snap areas to the next scrollable ancestor, per spec [1].
+// [1] https://drafts.csswg.org/css-scroll-snap/#overview
+test(() => {
+  const innerscroller = document.getElementById("inner-scroller");
+  const middlescroller = document.getElementById("middle-scroller");
+  const outerscroller = document.getElementById("outer-scroller");
+
+  // Middle and outer scrollers don't snap.
+  outerscroller.scrollBy(0, 10);
+  middlescroller.scrollBy(0, 10);
+  assert_equals(innerscroller.scrollTop, 0);
+  assert_equals(middlescroller.scrollTop, 10);
+  assert_equals(outerscroller.scrollTop, 10);
+
+  // Inner scroller snaps.
+  innerscroller.scrollBy(0, 10);
+  assert_equals(innerscroller.scrollTop, 400);
+  assert_equals(middlescroller.scrollTop, 10);
+  assert_equals(outerscroller.scrollTop, 10);
+
+  // Inner scroller is no longer a scroll container.
+  innerscroller.style.setProperty("overflow", "visible");
+  assert_equals(innerscroller.scrollTop, 0);
+  assert_equals(middlescroller.scrollTop, 10);
+  assert_equals(outerscroller.scrollTop, 10);
+
+  // The new snap container is the middle scroller, which has snap-type 'none'.
+  // Scrolling either the outer or middler scroller should not snap.
+  outerscroller.scrollBy(0, 10);
+  middlescroller.scrollBy(0, 10);
+  assert_equals(innerscroller.scrollTop, 0);
+  assert_equals(middlescroller.scrollTop, 20);
+  assert_equals(outerscroller.scrollTop, 20);
+
+  // Middle scroller is no longer a scroll container.
+  middlescroller.style.setProperty("overflow", "visible");
+  assert_equals(innerscroller.scrollTop, 0);
+  assert_equals(middlescroller.scrollTop, 0);
+  assert_equals(outerscroller.scrollTop, 20);
+
+  // Snapping should happen because the ancestor is the outer scroller, which
+  // has snap-type mandatory. The scroll offset should be equal to:
+  // middle-scroller.top + inner-scroller.top + snap-area.top;
+  outerscroller.scrollBy(0, 10);
+  assert_equals(innerscroller.scrollTop, 0);
+  assert_equals(middlescroller.scrollTop, 0);
+  assert_equals(outerscroller.scrollTop, 700);
+
+  // The scroll container should now be at the document level.
+  outerscroller.style.setProperty("overflow", "visible");
+  document.scrollingElement.scrollBy(0, 10);
+  assert_equals(innerscroller.scrollTop, 0);
+  assert_equals(middlescroller.scrollTop, 0);
+  assert_equals(outerscroller.scrollTop, 0);
+  assert_equals(document.scrollingElement.scrollTop, 700);
+}, 'Making a snap container not scrollable should promote the next scrollable\
+ancestor to the new snap container.');
+</script>
