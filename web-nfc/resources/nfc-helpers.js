@@ -219,3 +219,9 @@ function testReadingMultiMessages(
     await promise;
   }, desc);
 }
+
+// Calls NDEFWriter.push() in a context that is allowed to push a NDEF message.
+async function pushMessageWithTrustedClick(writer, message, options) {
+  await test_driver.bless('push NDEF message');
+  return writer.push(message, options);
+}
