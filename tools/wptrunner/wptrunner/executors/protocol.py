@@ -1,9 +1,26 @@
+# mypy: allow-untyped-defs
+
+import collections
 import traceback
+from http.client import HTTPConnection
 
 from abc import ABCMeta, abstractmethod
+from typing import Any, Awaitable, Callable, ClassVar, List, Mapping, Optional, Tuple, Type
 
 
-class Protocol(object):
+def merge_dicts(target, source):
+    if not (isinstance(target, dict) and isinstance(source, dict)):
+        raise TypeError
+    for (key, source_value) in source.items():
+        if key not in target:
+            target[key] = source_value
+        else:
+            if isinstance(source_value, dict) and isinstance(target[key], dict):
+                merge_dicts(target[key], source_value)
+            else:
+                target[key] = source_value
+
+class Protocol:
     """Backend for a specific browser-control protocol.
 
     Each Protocol is composed of a set of ProtocolParts that implement
@@ -16,7 +33,7 @@ class Protocol(object):
     :param Browser browser: The Browser using this protocol"""
     __metaclass__ = ABCMeta
 
-    implements = []
+    implements: ClassVar[List[Type["ProtocolPart"]]] = []
 
     def __init__(self, executor, browser):
         self.executor = executor
@@ -32,7 +49,6 @@ class Protocol(object):
         """:returns: Current logger"""
         return self.executor.logger
 
-    @property
     def is_alive(self):
         """Is the browser connection still active
 
@@ -54,10 +70,13 @@ class Protocol(object):
 
             msg = "Post-connection steps failed"
             self.after_connect()
+            for cls in self.implements:
+                getattr(self, cls.name).after_connect()
         except Exception:
-            if msg is not None:
-                self.logger.warning(msg)
-            self.logger.warning(traceback.format_exc())
+            message = "Protocol.setup caught an exception:\n"
+            message += f"{msg}\n" if msg is not None else ""
+            message += traceback.format_exc()
+            self.logger.warning(message)
             raise
 
     @abstractmethod
@@ -77,13 +96,13 @@ class Protocol(object):
             getattr(self, cls.name).teardown()
 
 
-class ProtocolPart(object):
+class ProtocolPart:
     """Base class  for all ProtocolParts.
 
     :param Protocol parent: The parent protocol"""
     __metaclass__ = ABCMeta
 
-    name = None
+    name: ClassVar[str]
 
     def __init__(self, parent):
         self.parent = parent
@@ -95,6 +114,11 @@ class ProtocolPart(object):
 
     def setup(self):
         """Run any setup steps required for the ProtocolPart."""
+        pass
+
+    def after_connect(self):
+        """Run any post-connection steps. This happens after the ProtocolParts are
+        initalized so can depend on a fully-populated object."""
         pass
 
     def teardown(self):
@@ -129,7 +153,17 @@ class BaseProtocolPart(ProtocolPart):
 
     @abstractmethod
     def wait(self):
-        """Wait indefinitely for the browser to close"""
+        """Wait indefinitely for the browser to close.
+
+        :returns: True to re-run the test, or False to continue with the next test"""
+        pass
+
+    @abstractmethod
+    def create_window(self, type="tab", **kwargs):
+        """Return a handle identifying a freshly created top level browsing context
+
+        :param type: - Type hint, either "tab" or "window"
+        :returns: A protocol-specific handle"""
         pass
 
     @property
@@ -145,6 +179,18 @@ class BaseProtocolPart(ProtocolPart):
 
         :param handle: A protocol-specific handle identifying a top level browsing
                        context."""
+        pass
+
+    @abstractmethod
+    def window_handles(self):
+        """Get a list of handles to top-level browsing contexts"""
+        pass
+
+    @abstractmethod
+    def load(self, url):
+        """Load a url in the current browsing context
+
+        :param url: The url to load"""
         pass
 
 
@@ -173,16 +219,8 @@ class TestharnessProtocolPart(ProtocolPart):
         pass
 
     @abstractmethod
-    def get_test_window(self, window_id, parent):
-        """Get the window handle dorresponding to the window containing the
-        currently active test.
-
-        :param window_id: A string containing the DOM name of the Window that
-        contains the test, or None.
-        :param parent: The handle of the runner window.
-        :returns: A protocol-specific window handle.
-        """
-        pass
+    def test_window_loaded(self):
+        """Wait until the newly opened test window has been loaded."""
 
 
 class PrefsProtocolPart(ProtocolPart):
@@ -228,6 +266,12 @@ class StorageProtocolPart(ProtocolPart):
         :param url: A url belonging to the origin"""
         pass
 
+    @abstractmethod
+    def run_bounce_tracking_mitigations(self):
+        """Run the Bounce Tracking Mitigations deletion/enforcement algorithm
+
+        :returns: A list of sites corresponding to bounce trackers whose state was removed"""
+        pass
 
 class SelectorProtocolPart(ProtocolPart):
     """Protocol part for selecting elements on the page."""
@@ -235,28 +279,18 @@ class SelectorProtocolPart(ProtocolPart):
 
     name = "select"
 
-    def element_by_selector(self, element_selector, frame="window"):
-        elements = self.elements_by_selector_and_frame(element_selector, frame)
-        frame_name = "window"
-        if (frame != "window"):
-            frame_name = frame.id
+    def element_by_selector(self, element_selector):
+        elements = self.elements_by_selector(element_selector)
         if len(elements) == 0:
-            raise ValueError("Selector '%s' in frame '%s' matches no elements" % (element_selector, frame_name))
+            raise ValueError(f"Selector '{element_selector}' matches no elements")
         elif len(elements) > 1:
-            raise ValueError("Selector '%s' in frame '%s' matches multiple elements" % (element_selector, frame_name))
+            raise ValueError(f"Selector '{element_selector}' matches multiple elements")
         return elements[0]
 
     @abstractmethod
     def elements_by_selector(self, selector):
         """Select elements matching a CSS selector
 
-        :param str selector: The CSS selector
-        :returns: A list of protocol-specific handles to elements"""
-        pass
-
-    @abstractmethod
-    def elements_by_selector_and_frame(self, element_selector, frame):
-        """Select elements matching a CSS selector
         :param str selector: The CSS selector
         :returns: A list of protocol-specific handles to elements"""
         pass
@@ -276,6 +310,127 @@ class ClickProtocolPart(ProtocolPart):
         pass
 
 
+class AccessibilityProtocolPart(ProtocolPart):
+    """Protocol part for accessibility introspection"""
+    __metaclass__ = ABCMeta
+
+    name = "accessibility"
+
+    @abstractmethod
+    def get_computed_label(self, element):
+        """Return the computed accessibility label for a specific element.
+
+        :param element: A protocol-specific handle to an element."""
+        pass
+
+    def get_computed_role(self, element):
+        """Return the computed accessibility role for a specific element.
+
+        :param element: A protocol-specific handle to an element."""
+        pass
+
+
+class BidiBrowsingContextProtocolPart(ProtocolPart):
+    """Protocol part for managing BiDi events"""
+    __metaclass__ = ABCMeta
+    name = "bidi_browsing_context"
+
+    @abstractmethod
+    async def handle_user_prompt(self,
+                                 context: str,
+                                 accept: Optional[bool] = None,
+                                 user_text: Optional[str] = None) -> None:
+        """
+        Allows closing an open prompt.
+        :param context: The context of the prompt.
+        :param accept: Whether to accept or dismiss the prompt.
+        :param user_text: The text to input in the prompt.
+        """
+        pass
+
+
+class BidiEventsProtocolPart(ProtocolPart):
+    """Protocol part for managing BiDi events"""
+    __metaclass__ = ABCMeta
+    name = "bidi_events"
+
+    @abstractmethod
+    async def subscribe(self,
+                        events: List[str],
+                        contexts: Optional[List[str]]) -> Mapping[str, Any]:
+        """
+        Subscribes to the given events in the given contexts.
+        :param events: The events to subscribe to.
+        :param contexts: The contexts to subscribe to. If None, the function will subscribe to all contexts.
+        """
+        pass
+
+    @abstractmethod
+    async def unsubscribe_all(self):
+        """Cleans up the subscription state. Removes all the previously added subscriptions."""
+        pass
+
+    @abstractmethod
+    def add_event_listener(
+            self,
+            name: Optional[str],
+            fn: Callable[[str, Mapping[str, Any]], Awaitable[Any]]
+    ) -> Callable[[], None]:
+        """Add an event listener. The callback will be called with the event name and the event data.
+
+        :param name: The name of the event to listen for. If None, the function will be called for all events.
+        :param fn: The function to call when the event is received.
+        :return: Function to remove the added listener."""
+        pass
+
+
+class BidiScriptProtocolPart(ProtocolPart):
+    """Protocol part for executing BiDi scripts"""
+    __metaclass__ = ABCMeta
+
+    name = "bidi_script"
+
+    @abstractmethod
+    async def call_function(
+            self,
+            function_declaration: str,
+            target: Mapping[str, Any],
+            arguments: Optional[List[Mapping[str, Any]]] = None
+    ) -> Mapping[str, Any]:
+        """
+        Executes the provided script in the given target in asynchronous mode.
+
+        :param str function_declaration: The js source of the function to execute.
+        :param script.Target target: The target in which to execute the script.
+        :param list[script.LocalValue] arguments: The arguments to pass to the script.
+        """
+        pass
+
+
+class CookiesProtocolPart(ProtocolPart):
+    """Protocol part for managing cookies"""
+    __metaclass__ = ABCMeta
+
+    name = "cookies"
+
+    @abstractmethod
+    def delete_all_cookies(self):
+        """Delete all cookies."""
+        pass
+
+    @abstractmethod
+    def get_all_cookies(self):
+        """Get all cookies."""
+        pass
+
+    @abstractmethod
+    def get_named_cookie(self, name):
+        """Get named cookie.
+
+        :param name: The name of the cookie to get."""
+        pass
+
+
 class SendKeysProtocolPart(ProtocolPart):
     """Protocol part for performing trusted clicks"""
     __metaclass__ = ABCMeta
@@ -290,6 +445,26 @@ class SendKeysProtocolPart(ProtocolPart):
         :param keys: A protocol-specific handle to a string of input keys."""
         pass
 
+class WindowProtocolPart(ProtocolPart):
+    """Protocol part for manipulating the window"""
+    __metaclass__ = ABCMeta
+
+    name = "window"
+
+    @abstractmethod
+    def set_rect(self, rect):
+        """Restores the window to the given rect."""
+        pass
+
+    @abstractmethod
+    def get_rect(self):
+        """Gets the current window rect."""
+        pass
+
+    @abstractmethod
+    def minimize(self):
+        """Minimizes the window and returns the previous rect."""
+        pass
 
 class GenerateTestReportProtocolPart(ProtocolPart):
     """Protocol part for generating test reports"""
@@ -302,6 +477,21 @@ class GenerateTestReportProtocolPart(ProtocolPart):
         """Generate a test report.
 
         :param message: The message to be contained in the report."""
+        pass
+
+
+class SetPermissionProtocolPart(ProtocolPart):
+    """Protocol part for setting permissions"""
+    __metaclass__ = ABCMeta
+
+    name = "set_permission"
+
+    @abstractmethod
+    def set_permission(self, descriptor, state):
+        """Set permission state.
+
+        :param descriptor: A PermissionDescriptor object.
+        :param state: The state to set the permission to."""
         pass
 
 
@@ -318,6 +508,9 @@ class ActionSequenceProtocolPart(ProtocolPart):
         :param actions: A protocol-specific handle to an array of actions."""
         pass
 
+    def release(self):
+        pass
+
 
 class TestDriverProtocolPart(ProtocolPart):
     """Protocol part that implements the basic functionality required for
@@ -327,13 +520,87 @@ class TestDriverProtocolPart(ProtocolPart):
     name = "testdriver"
 
     @abstractmethod
-    def send_message(self, message_type, status, message=None):
+    def send_message(self, cmd_id, message_type, status, message=None):
         """Send a testdriver message to the browser.
 
+        :param int cmd_id: The id of the command to which we're responding
         :param str message_type: The kind of the message.
         :param str status: Either "failure" or "success" depending on whether the
                            previous command succeeded.
         :param str message: Additional data to add to the message."""
+        pass
+
+    def switch_to_window(self, wptrunner_id, initial_window=None):
+        """Switch to a window given a wptrunner window id
+
+        :param str wptrunner_id: Testdriver-specific id for the target window
+        :param str initial_window: WebDriver window id for the test window"""
+        if wptrunner_id is None:
+            return
+
+        if initial_window is None:
+            initial_window = self.parent.base.current_window
+
+        stack = [str(item) for item in self.parent.base.window_handles()]
+        first = True
+        while stack:
+            item = stack.pop()
+
+            if item is None:
+                assert first is False
+                self._switch_to_parent_frame()
+                continue
+
+            if isinstance(item, str):
+                if not first or item != initial_window:
+                    self.parent.base.set_window(item)
+                first = False
+            else:
+                assert first is False
+                try:
+                    self._switch_to_frame(item)
+                except ValueError:
+                    # The frame no longer exists, or doesn't have a nested browsing context, so continue
+                    continue
+
+            try:
+                # Get the window id and a list of elements containing nested browsing contexts.
+                # For embed we can't tell fpr sure if there's a nested browsing context, so always return it
+                # and fail later if there isn't
+                result = self.parent.base.execute_script("""
+                let contextParents = Array.from(document.querySelectorAll("frame, iframe, embed, object"))
+                    .filter(elem => elem.localName !== "embed" ? (elem.contentWindow !== null) : true);
+                return [window.__wptrunner_id, contextParents]""")
+            except Exception:
+                continue
+
+            if result is None:
+                # With marionette at least this is possible if the content process crashed. Not quite
+                # sure how we want to handle that case.
+                continue
+
+            handle_window_id, nested_context_containers = result
+
+            if handle_window_id and str(handle_window_id) == wptrunner_id:
+                return
+
+            for elem in reversed(nested_context_containers):
+                # None here makes us switch back to the parent after we've processed the frame
+                stack.append(None)
+                stack.append(elem)
+
+        raise Exception("Window with id %s not found" % wptrunner_id)
+
+    @abstractmethod
+    def _switch_to_frame(self, index_or_elem):
+        """Switch to a frame in the current window
+
+        :param int index_or_elem: Frame id or container element"""
+        pass
+
+    @abstractmethod
+    def _switch_to_parent_frame(self):
+        """Switch to the parent of the current frame"""
         pass
 
 
@@ -348,6 +615,37 @@ class AssertsProtocolPart(ProtocolPart):
     def get(self):
         """Get a count of assertions since the last browser start"""
         pass
+
+
+class LeakProtocolPart(ProtocolPart):
+    """Protocol part that checks for leaked DOM objects."""
+    __metaclass__ = ABCMeta
+
+    name = "leak"
+
+    def after_connect(self):
+        self.parent.base.load("about:blank")
+        self.expected_counters = collections.Counter(self.get_counters())
+
+    @abstractmethod
+    def get_counters(self) -> Mapping[str, int]:
+        """Get counts of types of live objects (names are browser-dependent)."""
+
+    def check(self) -> Optional[Mapping[str, Tuple[int, int]]]:
+        """Check for DOM objects that outlive the current page.
+
+        Returns:
+            A map from object type to (expected, actual) counts, if one or more
+            types leaked. Otherwise, `None`.
+        """
+        self.parent.base.load("about:blank")
+        counters = collections.Counter(self.get_counters())
+        if counters - self.expected_counters:
+            return {
+                name: (self.expected_counters[name], counters[name])
+                for name in set(counters) | set(self.expected_counters)
+            }
+        return None
 
 
 class CoverageProtocolPart(ProtocolPart):
@@ -365,6 +663,7 @@ class CoverageProtocolPart(ProtocolPart):
     def dump(self):
         """Dump coverage counters"""
         pass
+
 
 class VirtualAuthenticatorProtocolPart(ProtocolPart):
     """Protocol part for creating and manipulating virtual authenticators"""
@@ -423,4 +722,235 @@ class VirtualAuthenticatorProtocolPart(ProtocolPart):
 
         :param str authenticator_id: The ID of the authenticator
         :param bool uv: the user verified flag"""
+        pass
+
+
+class SPCTransactionsProtocolPart(ProtocolPart):
+    """Protocol part for Secure Payment Confirmation transactions"""
+    __metaclass__ = ABCMeta
+
+    name = "spc_transactions"
+
+    @abstractmethod
+    def set_spc_transaction_mode(self, mode):
+        """Set the SPC transaction automation mode
+
+        :param str mode: The automation mode to set"""
+        pass
+
+class RPHRegistrationsProtocolPart(ProtocolPart):
+    """Protocol part for Custom Handlers registrations"""
+    __metaclass__ = ABCMeta
+
+    name = "rph_registrations"
+
+    @abstractmethod
+    def set_rph_registration_mode(self, mode):
+        """Set the RPH registration automation mode
+
+        :param str mode: The automation mode to set"""
+        pass
+
+class FedCMProtocolPart(ProtocolPart):
+    """Protocol part for Federated Credential Management"""
+    __metaclass__ = ABCMeta
+
+    name = "fedcm"
+
+    @abstractmethod
+    def cancel_fedcm_dialog(self):
+        """Cancel the FedCM dialog"""
+        pass
+
+    @abstractmethod
+    def click_fedcm_dialog_button(self, dialog_button):
+        """Click a button on the FedCM dialog
+
+        :param str dialog_button: The dialog button to click"""
+        pass
+
+    @abstractmethod
+    def select_fedcm_account(self, account_index):
+        """Select a FedCM account
+
+        :param int account_index: The index of the account to select"""
+        pass
+
+    @abstractmethod
+    def get_fedcm_account_list(self):
+        """Get the FedCM account list"""
+        pass
+
+    @abstractmethod
+    def get_fedcm_dialog_title(self):
+        """Get the FedCM dialog title"""
+        pass
+
+    @abstractmethod
+    def get_fedcm_dialog_type(self):
+        """Get the FedCM dialog type"""
+        pass
+
+    @abstractmethod
+    def set_fedcm_delay_enabled(self, enabled):
+        """Sets the FedCM delay as enabled or disabled
+
+        :param bool enabled: The delay to set"""
+        pass
+
+    @abstractmethod
+    def reset_fedcm_cooldown(self):
+        """Set the FedCM cooldown"""
+        pass
+
+
+class PrintProtocolPart(ProtocolPart):
+    """Protocol part for rendering to a PDF."""
+    __metaclass__ = ABCMeta
+
+    name = "pdf_print"
+
+    @abstractmethod
+    def render_as_pdf(self, width, height):
+        """Output document as PDF"""
+        pass
+
+
+class DebugProtocolPart(ProtocolPart):
+    """Protocol part for debugging test failures."""
+    __metaclass__ = ABCMeta
+
+    name = "debug"
+
+    @abstractmethod
+    def load_devtools(self):
+        """Load devtools in the current window"""
+        pass
+
+    def load_reftest_analyzer(self, test, result):
+        import io
+        import mozlog
+        from urllib.parse import quote, urljoin
+
+        debug_test_logger = mozlog.structuredlog.StructuredLogger("debug_test")
+        output = io.StringIO()
+        debug_test_logger.suite_start([])
+        debug_test_logger.add_handler(mozlog.handlers.StreamHandler(output, formatter=mozlog.formatters.TbplFormatter()))
+        debug_test_logger.test_start(test.id)
+        # Always use PASS as the expected value so we get output even for expected failures
+        debug_test_logger.test_end(test.id, result["status"], "PASS", extra=result.get("extra"))
+
+        self.parent.base.load(urljoin(self.parent.executor.server_url("https"),
+                              "/common/third_party/reftest-analyzer.xhtml#log=%s" %
+                               quote(output.getvalue())))
+
+
+class ConnectionlessBaseProtocolPart(BaseProtocolPart):
+    def load(self, url):
+        pass
+
+    def execute_script(self, script, asynchronous=False):
+        pass
+
+    def set_timeout(self, timeout):
+        pass
+
+    def wait(self):
+        return False
+
+    def set_window(self, handle):
+        pass
+
+    def window_handles(self):
+        return []
+
+
+class ConnectionlessProtocol(Protocol):
+    implements = [ConnectionlessBaseProtocolPart]
+
+    def connect(self):
+        pass
+
+    def after_connect(self):
+        pass
+
+
+class WdspecProtocol(ConnectionlessProtocol):
+    implements = [ConnectionlessBaseProtocolPart]
+
+    def __init__(self, executor, browser):
+        super().__init__(executor, browser)
+
+    def is_alive(self):
+        """Test that the connection is still alive.
+
+        Because the remote communication happens over HTTP we need to
+        make an explicit request to the remote.  It is allowed for
+        WebDriver spec tests to not have a WebDriver session, since this
+        may be what is tested.
+
+        An HTTP request to an invalid path that results in a 404 is
+        proof enough to us that the server is alive and kicking.
+        """
+        conn = HTTPConnection(self.browser.host, self.browser.port)
+        try:
+            conn.request("HEAD", "/invalid")
+            res = conn.getresponse()
+            return res.status == 404
+        except OSError:
+            return False
+
+
+class VirtualSensorProtocolPart(ProtocolPart):
+    """Protocol part for Sensors"""
+    __metaclass__ = ABCMeta
+
+    name = "virtual_sensor"
+
+    @abstractmethod
+    def create_virtual_sensor(self, sensor_type, sensor_params):
+        pass
+
+    @abstractmethod
+    def update_virtual_sensor(self, sensor_type, reading):
+        pass
+
+    @abstractmethod
+    def remove_virtual_sensor(self, sensor_type):
+        pass
+
+    @abstractmethod
+    def get_virtual_sensor_information(self, sensor_type):
+        pass
+
+class DevicePostureProtocolPart(ProtocolPart):
+    """Protocol part for Device Posture"""
+    __metaclass__ = ABCMeta
+
+    name = "device_posture"
+
+    @abstractmethod
+    def set_device_posture(self, posture):
+        pass
+
+    @abstractmethod
+    def clear_device_posture(self):
+        pass
+
+class VirtualPressureSourceProtocolPart(ProtocolPart):
+    """Protocol part for Virtual Pressure Source"""
+    __metaclass__ = ABCMeta
+
+    name = "pressure"
+
+    @abstractmethod
+    def create_virtual_pressure_source(self, source_type, metadata):
+        pass
+
+    @abstractmethod
+    def update_virtual_pressure_source(self, source_type, sample):
+        pass
+
+    @abstractmethod
+    def remove_virtual_pressure_source(self, source_type):
         pass

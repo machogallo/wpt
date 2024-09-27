@@ -224,8 +224,8 @@ test(() => {
   // <div #outside>
   // First focusable = #slottedToFirstSlot
   host.focus();
-  assert_equals(shadowRoot.activeElement, null);
-  assert_equals(document.activeElement, slottedToFirstSlot);
+  assert_equals(shadowRoot.activeElement, belowSlots);
+  assert_equals(document.activeElement, host);
 }, "focus() on host with delegatesFocus & tabindex=0, #slottedToFirstSlot, #slottedToSecondSlot, #belowSlots  with tabindex=0");
 
 test(() => {
@@ -236,5 +236,77 @@ test(() => {
   assert_equals(shadowRoot.activeElement, belowSlots);
 }, "focus() on host with delegatesFocus and already-focused non-first shadow descendant");
 
+function createNestedHosts(innerDelegatesFocus) {
+  // Structure:
+  // <div> outerHost
+  //   <input> outerLightChild
+  //   #shadowRoot outerShadow delegatesFocus=true
+  //     <span> innerHost
+  //       #shadowRoot inneShadow delegatesFocus=true/false
+  //         <input> innerShadowChild
+  //     <input> outerShadowChild
+  const outerHost = document.createElement('div');
+  const outerLightChild = document.createElement('input');
+  outerHost.appendChild(outerLightChild);
+  const innerHost = document.createElement('span');
+  const outerShadow = outerHost.attachShadow({mode: 'closed', delegatesFocus:true});
+  outerShadow.appendChild(innerHost);
+  const outerShadowChild = document.createElement('input');
+  outerShadow.appendChild(outerShadowChild);
+
+  const innerShadow = innerHost.attachShadow({mode: 'closed', delegatesFocus:innerDelegatesFocus});
+  const innerShadowChild = document.createElement('input');
+  innerShadow.appendChild(innerShadowChild);
+
+  document.body.insertBefore(outerHost, document.body.firstChild);
+  return {outerHost: outerHost,
+      outerLightChild: outerLightChild,
+      outerShadow: outerShadow,
+      outerShadowChild: outerShadowChild,
+      innerHost: innerHost,
+      innerShadow: innerShadow,
+      innerShadowChild: innerShadowChild};
+}
+
+test(() => {
+  const dom = createNestedHosts(false);
+  dom.outerHost.focus();
+  assert_equals(document.activeElement, dom.outerHost);
+  assert_equals(dom.outerShadow.activeElement, dom.outerShadowChild);
+}, 'focus() on host with delegatesFocus with another host with no delegatesFocus and a focusable child');
+
+test(() => {
+  const dom = createNestedHosts(true);
+  dom.outerHost.focus();
+  assert_equals(document.activeElement, dom.outerHost);
+  assert_equals(dom.outerShadow.activeElement, dom.innerHost);
+  assert_equals(dom.innerShadow.activeElement, dom.innerShadowChild);
+}, 'focus() on host with delegatesFocus with another host with delegatesFocus and a focusable child');
+
+test(() => {
+  // Structure:
+  // <div> host
+  //   #shadowRoot root delegatesFocus=true
+  //    <slot>
+  //      (slotted) <div>
+  //        <input>
+  //    <input #firstFocusable>
+  const host = document.createElement("div");
+  const slotted = document.createElement("div");
+  slotted.appendChild(document.createElement("input"));
+  host.appendChild(slotted);
+
+  const root = host.attachShadow({mode: "open", delegatesFocus: true});
+
+  const firstFocusable = document.createElement("input");
+  root.innerHTML = "<slot>";
+  root.appendChild(firstFocusable);
+
+  document.body.appendChild(host);
+
+  host.focus();
+  assert_equals(document.activeElement, host);
+  assert_equals(root.activeElement, firstFocusable);
+}, "focus() on host with delegatesFocus and slotted focusable children");
 </script>
 

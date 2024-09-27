@@ -4,7 +4,6 @@
 <script src="/resources/testharness.js"></script>
 <script src="/resources/testharnessreport.js"></script>
 <script src="../webrtc/RTCPeerConnection-helper.js"></script>
-<script src="../webrtc/RTCStats-helper.js"></script>
 <script>
   'use strict';
 
@@ -26,7 +25,7 @@ promise_test(async (test) => {
         if (event.candidate)
             remotePc.addIceCandidate(event.candidate);
     });
-    doSignalingHandshake(localPc, remotePc);
+    exchangeOfferAnswer(localPc, remotePc);
 
     const remoteDataChannel = await promiseDataChannel;
 
@@ -36,7 +35,7 @@ promise_test(async (test) => {
         remoteDataChannel.onmessage = resolve;
     });
 
-    const remoteCandidateStats = getRequiredStats(await localPc.getStats(), "remote-candidate");
+    const remoteCandidateStats = [...(await localPc.getStats()).values()].find(({type}) => type === 'remote-candidate');
     assert_equals(remoteCandidateStats.address, null, "address should be null");
 }, "Do not expose in stats remote addresses that are not known to be already exposed to JS");
 
@@ -63,7 +62,7 @@ promise_test(async (test) => {
         if (event.candidate)
             localPc.addIceCandidate(event.candidate);
     });
-    doSignalingHandshake(localPc, remotePc);
+    exchangeOfferAnswer(localPc, remotePc);
 
     const remoteDataChannel = await promiseDataChannel;
 
@@ -73,9 +72,8 @@ promise_test(async (test) => {
         remoteDataChannel.onmessage = resolve;
     });
 
-    const remoteCandidateStats = getRequiredStats(await localPc.getStats(), "remote-candidate");
+    const remoteCandidateStats = [...(await localPc.getStats()).values()].find(({type}) => type === 'remote-candidate');
     assert_not_equals(remoteCandidateStats.address, null, "address should not be null");
-
 }, "Expose in stats remote addresses that are already exposed to JS");
 
 </script>

@@ -105,23 +105,6 @@ test(t => {
   const div = addDiv(t);
   const anim = div.animate(
     {
-      marginInlineStart: '100px',
-      marginInline: '200px',
-      margin: 'logical 300px',
-    },
-    { duration: 1, easing: 'step-start' }
-  );
-  assert_equals(getComputedStyle(div).marginLeft, '100px');
-  assert_equals(getComputedStyle(div).marginRight, '200px');
-  assert_equals(getComputedStyle(div).marginTop, '300px');
-  assert_equals(getComputedStyle(div).marginBottom, '300px');
-}, 'Logical shorthands follow the usual prioritization based on number of'
-   + ' component longhands');
-
-test(t => {
-  const div = addDiv(t);
-  const anim = div.animate(
-    {
       marginInline: '100px',
       marginLeft: '200px',
     },
@@ -298,6 +281,18 @@ test(t => {
   assert_equals(getComputedStyle(div).marginLeft, '0px');
   assert_equals(getComputedStyle(div).marginRight, '50px');
 }, 'Animations update when the direction is changed');
+
+test(t => {
+  const div = addDiv(t);
+  const anim = div.animate(
+    {
+      insetBlock: ['var(--200px)', 'var(--300px)'],
+    },
+    1000
+  );
+  anim.currentTime = 500;
+  assert_equals(getComputedStyle(div).insetBlockStart, '250px');
+}, 'Logical shorthand with variable references animates correctly');
 
 test(t => {
   const div = addDiv(t);
